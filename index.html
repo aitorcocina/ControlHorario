@@ -144,15 +144,29 @@ function sbHeaders(extra){
   return Object.assign({ apikey: SUPABASE_KEY, Authorization: 'Bearer '+SUPABASE_KEY, 'Content-Type':'application/json' }, extra||{});
 }
 async function sbSet(key, value){
+  let ok = false;
   try{
     const res = await fetch(`${SUPABASE_URL}/rest/v1/${SB_TABLE}?on_conflict=key`, {
       method:'POST',
       headers: sbHeaders({ Prefer:'resolution=merge-duplicates' }),
       body: JSON.stringify([{ key:key, value:value }])
     });
-    cloudStatus = res.ok ? 'ok' : 'error';
+    ok = res.ok;
+    cloudStatus = ok ? 'ok' : 'error';
   }catch(e){ cloudStatus = 'error'; }
   renderCloudBadge();
+  return ok;
+}
+// Cola de escritura: cada guardado espera a que termine el anterior antes de mandarse,
+// para que dos guardados seguidos no puedan llegar a la nube en orden distinto al que
+// los hiciste (eso es lo que podía "perder" una edición reciente).
+let sbWriteChain = Promise.resolve();
+function queueCloudSave(){
+  sbWriteChain = sbWriteChain.then(async ()=>{
+    const ok = await sbSet('turnos', turnos);
+    if(ok) DB.set('pendingSync', false);
+  });
+  return sbWriteChain;
 }
 async function sbGetTurnos(){
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${SB_TABLE}?select=value&key=eq.turnos`, { headers: sbHeaders() });
@@ -173,9 +187,20 @@ function renderCloudBadge(){
 }
 async function initCloudSync(){
   cloudStatus = 'conectando'; renderCloudBadge();
+  const pending = DB.get('pendingSync', false);
   try{
     const cloudTurnos = await sbGetTurnos();
-    if(cloudTurnos){
+    if(pending){
+      // La última vez que se editó aquí, no llegamos a confirmar que se hubiera
+      // guardado en la nube. Para no perder esa edición, en caso de duda gana
+      // lo que hay en este dispositivo (fusionado mes a mes con lo que traiga la
+      // nube, por si mientras tanto se editó algo distinto desde otro dispositivo).
+      const merged = Object.assign({}, cloudTurnos||{}, turnos);
+      Object.keys(SEED_TURNOS).forEach(k=>{ if(!merged[k]) merged[k] = SEED_TURNOS[k]; });
+      turnos = merged;
+      persistLocalOnly();
+      await queueCloudSave();
+    } else if(cloudTurnos){
       // La nube manda, pero si este archivo trae meses nuevos (nuevos PDF que te haya
       // metido yo) que la nube todavía no tiene, se añaden y se vuelven a subir.
       const merged = Object.assign({}, cloudTurnos);
@@ -185,10 +210,10 @@ async function initCloudSync(){
       });
       turnos = merged;
       persistLocalOnly();
-      if(addedNew){ await sbSet('turnos', turnos); } else { cloudStatus = 'ok'; }
+      if(addedNew){ await queueCloudSave(); } else { cloudStatus = 'ok'; }
     } else {
       // La nube está vacía todavía: sube lo que haya aquí (incluye lo horneado del archivo).
-      await sbSet('turnos', turnos);
+      await queueCloudSave();
     }
   }catch(e){
     cloudStatus = 'error';
@@ -203,7 +228,11 @@ let horYear = new Date().getFullYear();
 let horMonth = new Date().getMonth();
 
 function persistLocalOnly(){ DB.set('turnos', turnos); }
-function persistTurnos(){ DB.set('turnos', turnos); sbSet('turnos', turnos); }
+function persistTurnos(){
+  DB.set('turnos', turnos);
+  DB.set('pendingSync', true);
+  queueCloudSave();
+}
 
 /* ================= Meses importados de los PDF que me vas pasando =================
    Cada mes se aplica UNA sola vez (se marca en 'seedsApplied'), así que si luego
@@ -548,6 +577,15 @@ function renderAll(){
 }
 renderAll();
 initCloudSync();
+
+// Aviso si cierras/recargas la pestaña mientras un cambio todavía no se ha
+// confirmado como guardado en la nube (evita cerrar por error justo a tiempo).
+window.addEventListener('beforeunload', function(e){
+  if(DB.get('pendingSync', false)){
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
 </script>
 </body>
 </html>
