@@ -82,13 +82,14 @@
 <div class="app-shell">
   <header class="top">
     <h1>🕒 Mi Control Horario</h1>
-    <div class="sub">Aitor Martínez · copia personal, solo en este dispositivo</div>
+    <div class="sub">Aitor Martínez</div>
+    <div id="cloudBadge" style="font-size:12px; margin-top:6px; font-weight:600;"></div>
   </header>
 
   <main id="main"></main>
 
   <footer class="note">
-    Guardado solo en este navegador.
+    Sincronizado entre tus dispositivos.
     <div class="backup-line">
       <button class="file-btn" onclick="exportJSON()" style="border:none; background:none; text-decoration:underline; cursor:pointer;">Copia de seguridad</button>
       <label class="file-btn">Restaurar copia<input type="file" accept="application/json" onchange="importJSON(event)"></label>
@@ -131,12 +132,78 @@ function toast(msg){
   setTimeout(()=>el.classList.remove('show'), 2200);
 }
 
+/* ================= Sincronización en la nube (tu Supabase personal) =================
+   Sin PIN: la clave "anon" puede leer y escribir directamente, igual que la app
+   del restaurante. Así lo que edites en el ordenador o en el móvil se ve en ambos. */
+const SUPABASE_URL = 'https://bzjzedwbahgitunoksps.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_GwXGrJorusdd94VeHBH4Lg_C657Knj5';
+const SB_TABLE = 'aitor_horario';
+let cloudStatus = 'conectando'; // conectando | ok | error
+
+function sbHeaders(extra){
+  return Object.assign({ apikey: SUPABASE_KEY, Authorization: 'Bearer '+SUPABASE_KEY, 'Content-Type':'application/json' }, extra||{});
+}
+async function sbSet(key, value){
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${SB_TABLE}?on_conflict=key`, {
+      method:'POST',
+      headers: sbHeaders({ Prefer:'resolution=merge-duplicates' }),
+      body: JSON.stringify([{ key:key, value:value }])
+    });
+    cloudStatus = res.ok ? 'ok' : 'error';
+  }catch(e){ cloudStatus = 'error'; }
+  renderCloudBadge();
+}
+async function sbGetTurnos(){
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${SB_TABLE}?select=value&key=eq.turnos`, { headers: sbHeaders() });
+  if(!res.ok) throw new Error('No se pudo leer de Supabase');
+  const rows = await res.json();
+  return rows.length ? rows[0].value : null;
+}
+function renderCloudBadge(){
+  const el = document.getElementById('cloudBadge');
+  if(!el) return;
+  const map = {
+    conectando: ['⏳','Conectando...','var(--muted)'],
+    ok: ['☁️','Sincronizado','#3d5c37'],
+    error: ['⚠️','Sin conexión, guardado solo en este dispositivo','#8A4650'],
+  };
+  const [ic,txt,color] = map[cloudStatus];
+  el.innerHTML = `<span style="color:${color}">${ic} ${txt}</span>`;
+}
+async function initCloudSync(){
+  cloudStatus = 'conectando'; renderCloudBadge();
+  try{
+    const cloudTurnos = await sbGetTurnos();
+    if(cloudTurnos){
+      // La nube manda, pero si este archivo trae meses nuevos (nuevos PDF que te haya
+      // metido yo) que la nube todavía no tiene, se añaden y se vuelven a subir.
+      const merged = Object.assign({}, cloudTurnos);
+      let addedNew = false;
+      Object.keys(SEED_TURNOS).forEach(k=>{
+        if(!merged[k]){ merged[k] = SEED_TURNOS[k]; addedNew = true; }
+      });
+      turnos = merged;
+      persistLocalOnly();
+      if(addedNew){ await sbSet('turnos', turnos); } else { cloudStatus = 'ok'; }
+    } else {
+      // La nube está vacía todavía: sube lo que haya aquí (incluye lo horneado del archivo).
+      await sbSet('turnos', turnos);
+    }
+  }catch(e){
+    cloudStatus = 'error';
+  }
+  renderCloudBadge();
+  renderAll();
+}
+
 /* ================= Estado (una sola persona: Aitor Martínez) ================= */
 let turnos = DB.get('turnos', {}); // { "YYYY-MM": [ {id,dia,entM,salM,horasM,entN,salN,horasN} ] }
 let horYear = new Date().getFullYear();
 let horMonth = new Date().getMonth();
 
-function persistTurnos(){ DB.set('turnos', turnos); }
+function persistLocalOnly(){ DB.set('turnos', turnos); }
+function persistTurnos(){ DB.set('turnos', turnos); sbSet('turnos', turnos); }
 
 /* ================= Meses importados de los PDF que me vas pasando =================
    Cada mes se aplica UNA sola vez (se marca en 'seedsApplied'), así que si luego
@@ -480,6 +547,7 @@ function renderAll(){
   document.getElementById('main').innerHTML = renderApp();
 }
 renderAll();
+initCloudSync();
 </script>
 </body>
 </html>
