@@ -185,37 +185,34 @@ function renderCloudBadge(){
   const [ic,txt,color] = map[cloudStatus];
   el.innerHTML = `<span style="color:${color}">${ic} ${txt}</span>`;
 }
+// Orden de prioridad al construir los datos que se muestran:
+//  1) SEED_TURNOS  → lo horneado en este archivo (los PDF que te he metido), como base.
+//  2) la nube       → manda sobre el seed en cuanto hay algo guardado ahí.
+//  3) este dispositivo → solo manda por encima si de verdad tenías una edición sin
+//     confirmar (pendingSync=true), y solo para los meses que hayas tocado tú.
+// Así, abrir el archivo o que yo añada un mes nuevo NUNCA puede pisar por encima
+// de datos que ya estaban bien guardados en la nube.
 async function initCloudSync(){
   cloudStatus = 'conectando'; renderCloudBadge();
   const pending = DB.get('pendingSync', false);
+  const localSnapshot = turnos;
   try{
     const cloudTurnos = await sbGetTurnos();
+    let merged = Object.assign({}, SEED_TURNOS, cloudTurnos || {});
+    let needsPush = !cloudTurnos; // la nube está vacía todavía: hay que subir la base
     if(pending){
-      // La última vez que se editó aquí, no llegamos a confirmar que se hubiera
-      // guardado en la nube. Para no perder esa edición, en caso de duda gana
-      // lo que hay en este dispositivo (fusionado mes a mes con lo que traiga la
-      // nube, por si mientras tanto se editó algo distinto desde otro dispositivo).
-      const merged = Object.assign({}, cloudTurnos||{}, turnos);
-      Object.keys(SEED_TURNOS).forEach(k=>{ if(!merged[k]) merged[k] = SEED_TURNOS[k]; });
-      turnos = merged;
-      persistLocalOnly();
-      await queueCloudSave();
-    } else if(cloudTurnos){
-      // La nube manda, pero si este archivo trae meses nuevos (nuevos PDF que te haya
-      // metido yo) que la nube todavía no tiene, se añaden y se vuelven a subir.
-      const merged = Object.assign({}, cloudTurnos);
-      let addedNew = false;
-      Object.keys(SEED_TURNOS).forEach(k=>{
-        if(!merged[k]){ merged[k] = SEED_TURNOS[k]; addedNew = true; }
-      });
-      turnos = merged;
-      persistLocalOnly();
-      if(addedNew){ await queueCloudSave(); } else { cloudStatus = 'ok'; }
-    } else {
-      // La nube está vacía todavía: sube lo que haya aquí (incluye lo horneado del archivo).
-      await queueCloudSave();
+      merged = Object.assign(merged, localSnapshot);
+      needsPush = true;
     }
+    turnos = merged;
+    persistLocalOnly();
+    if(needsPush){ await queueCloudSave(); } else { cloudStatus = 'ok'; }
   }catch(e){
+    // Sin conexión: no sabemos qué hay en la nube, así que mostramos lo horneado
+    // en este archivo fusionado con lo último que ya teníamos en este dispositivo
+    // (sin forzar nada hacia la nube, para no arriesgarnos a subir algo a medias).
+    turnos = Object.assign({}, SEED_TURNOS, localSnapshot);
+    persistLocalOnly();
     cloudStatus = 'error';
   }
   renderCloudBadge();
@@ -439,20 +436,9 @@ const SEED_TURNOS = {
     seedRow(31,'','','','','',''),
   ],
 };
-function applySeeds(){
-  const applied = DB.get('seedsApplied', []);
-  let changed = false;
-  Object.keys(SEED_TURNOS).forEach(key=>{
-    if(!applied.includes(key)){
-      turnos[key] = SEED_TURNOS[key];
-      applied.push(key);
-      changed = true;
-    }
-  });
-  if(changed){ persistTurnos(); DB.set('seedsApplied', applied); }
-}
-applySeeds();
-// Al abrir el archivo, ve directo al mes más reciente que te he rellenado.
+// Al abrir el archivo, ve directo al mes más reciente que te he rellenado
+// (esto solo decide qué mes se ve primero; la fusión real de datos la hace
+// initCloudSync más abajo, sin depender de esto).
 const seedKeys = Object.keys(SEED_TURNOS).sort();
 if(seedKeys.length){
   const [ly, lm] = seedKeys[seedKeys.length-1].split('-').map(Number);
@@ -462,9 +448,13 @@ if(seedKeys.length){
 function getMonthRows(y, m){
   const key = monthKey(y,m);
   if(!turnos[key]){
+    // Mes que no existe en ningún sitio todavía (ni nube, ni seed, ni local):
+    // se crea vacío solo para poder mostrarlo. Esto NO cuenta como una edición
+    // tuya, así que se guarda solo en este dispositivo sin marcarlo como
+    // "pendiente de sincronizar" ni forzar que gane sobre la nube.
     const n = daysInMonth(y,m);
     turnos[key] = Array.from({length:n}, (_,i)=>({id:uid(), dia:i+1, entM:'',salM:'',horasM:'',entN:'',salN:'',horasN:''}));
-    persistTurnos();
+    persistLocalOnly();
   }
   return turnos[key];
 }
