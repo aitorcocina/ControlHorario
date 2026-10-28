@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>Mi Control Horario</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -201,7 +203,13 @@ async function initCloudSync(){
     let merged = Object.assign({}, SEED_TURNOS, cloudTurnos || {});
     let needsPush = !cloudTurnos; // la nube está vacía todavía: hay que subir la base
     if(pending){
-      merged = Object.assign(merged, localSnapshot);
+      // Solo manda lo local en meses que tengan algo escrito: un mes vacío
+      // (creado solo para mostrarlo) nunca puede pisar horas de la nube.
+      Object.keys(localSnapshot||{}).forEach(k=>{
+        const rows = localSnapshot[k] || [];
+        const tieneDatos = rows.some(r => r.entM||r.salM||r.horasM||r.entN||r.salN||r.horasN);
+        if(tieneDatos || !merged[k]) merged[k] = rows;
+      });
       needsPush = true;
     }
     turnos = merged;
@@ -436,14 +444,8 @@ const SEED_TURNOS = {
     seedRow(31,'','','','','',''),
   ],
 };
-// Al abrir el archivo, ve directo al mes más reciente que te he rellenado
-// (esto solo decide qué mes se ve primero; la fusión real de datos la hace
-// initCloudSync más abajo, sin depender de esto).
-const seedKeys = Object.keys(SEED_TURNOS).sort();
-if(seedKeys.length){
-  const [ly, lm] = seedKeys[seedKeys.length-1].split('-').map(Number);
-  horYear = ly; horMonth = lm-1;
-}
+// Al abrir, se muestra el mes actual (horYear/horMonth ya vienen de la fecha de hoy).
+// Antes aquí se forzaba el último mes del seed (agosto) y por eso abría siempre ahí.
 
 function getMonthRows(y, m){
   const key = monthKey(y,m);
@@ -547,7 +549,45 @@ function importJSON(evt){
   };
   reader.readAsText(file);
 }
-function printMes(){
+// Genera el PDF de verdad (no depende de "Imprimir", que en el iPhone no funciona
+// cuando la app está abierta desde la pantalla de inicio). Solo LEE las horas.
+async function printMes(){
+  try{
+    if(!window.jspdf || !window.jspdf.jsPDF) throw new Error('sin librería PDF');
+    const { jsPDF } = window.jspdf;
+    const rows = getMonthRows(horYear, horMonth);
+    const total = monthTotal(rows);
+    const doc = new jsPDF({ unit:'mm', format:'a4' });
+    if(typeof doc.autoTable !== 'function') throw new Error('sin tabla PDF');
+    doc.setFontSize(15);
+    doc.text('Control Horario - Aitor Martínez', 14, 16);
+    doc.setFontSize(11);
+    doc.text(`${MESES[horMonth]} ${horYear} · Total: ${total.toFixed(1)} horas`, 14, 23);
+    doc.autoTable({
+      startY: 28,
+      head: [['Día','Ent.M','Sal.M','Hs.M','Ent.N','Sal.N','Hs.N','Total']],
+      body: rows.map(r=>[r.dia, r.entM||'-', r.salM||'-', r.horasM||'0', r.entN||'-', r.salN||'-', r.horasN||'0', rowTotal(r).toFixed(1)]),
+      foot: [['','','','','','','Total', total.toFixed(1)]],
+      styles: { fontSize:8.5, halign:'center', cellPadding:1.4 },
+      headStyles: { fillColor:[62,58,52] },
+      footStyles: { fillColor:[242,196,166], textColor:[62,58,52] },
+      theme: 'grid',
+      margin: { left:14, right:14 }
+    });
+    const nombre = `Control_horario_${MESES[horMonth]}_${horYear}.pdf`;
+    const blob = doc.output('blob');
+    const file = new File([blob], nombre, { type:'application/pdf' });
+    if(navigator.canShare && navigator.canShare({ files:[file] })){
+      try{ await navigator.share({ files:[file], title: nombre }); return; }
+      catch(e){ if(e && e.name === 'AbortError') return; }
+    }
+    downloadBlob(blob, nombre, 'application/pdf');
+    toast('PDF descargado');
+  }catch(err){
+    printMesImprimir();
+  }
+}
+function printMesImprimir(){
   const rows = getMonthRows(horYear, horMonth);
   const total = monthTotal(rows);
   document.getElementById('p-title').textContent = 'Control Horario — Aitor Martínez';
